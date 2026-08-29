@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    if (window.vimu_iptv_plugin_v4) return;
-    window.vimu_iptv_plugin_v4 = true;
+    if (window.vimu_iptv_plugin_v5) return;
+    window.vimu_iptv_plugin_v5 = true;
 
     var TAG = '[VimuIPTV]';
 
@@ -19,63 +19,66 @@
             (Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android'));
     }
 
-    function getChannelUrl(ch) {
-        if (!ch) return '';
-        return String(ch.url || ch.stream || ch.link || ch.src || '').trim();
-    }
-
-    function getChannelTitle(ch) {
-        if (!ch) return 'Канал';
-        return String(ch.name || ch.title || ch.channel || ch.label || 'Канал').trim() || 'Канал';
-    }
-
     /**
-     * Збирає плейлист з IPTV-даних Lampa
+     * IPTV у Lampa не дає data.playlist —
+     * канали беруться через onGetChannel(i) + total
      */
-    function buildFromIptvData(data) {
+    function buildPlaylistFromIptv(data) {
         var urls = [];
         var titles = [];
-        var currentUrl = data.url ? String(data.url).trim() : '';
-        var list = data.playlist || [];
+        var total = parseInt(data.total, 10) || 0;
+        var startIndex = parseInt(data.position, 10) || 0;
 
-        if (list.length) {
-            list.forEach(function (item) {
-                var u = getChannelUrl(item);
+        log('build: total=', total, 'position=', startIndex, 'has onGetChannel=', typeof data.onGetChannel);
+
+        // 1) Через onGetChannel — повний список категорії
+        if (typeof data.onGetChannel === 'function' && total > 0) {
+            for (var i = 0; i < total; i++) {
+                try {
+                    var ch = data.onGetChannel(i);
+                    if (!ch) continue;
+                    var u = String(ch.url || ch.stream || ch.link || '').trim();
+                    if (!u) continue;
+                    urls.push(u);
+                    titles.push(String(ch.name || ch.title || ch.channel || ('Канал ' + (i + 1))).trim());
+                } catch (e) {
+                    error('onGetChannel(' + i + ')', e && (e.message || e));
+                }
+            }
+            // position у data — індекс у icons_clone; після збору з onGetChannel
+            // порядок той самий, startIndex залишається
+        }
+
+        // 2) Якщо вже є playlist (архів / інші джерела)
+        if (!urls.length && data.playlist && data.playlist.length) {
+            data.playlist.forEach(function (item) {
+                var u = String((item && (item.url || item.stream)) || '').trim();
                 if (!u) return;
                 urls.push(u);
-                titles.push(getChannelTitle(item));
+                titles.push(String((item && (item.name || item.title)) || 'Канал').trim());
             });
         }
 
-        if (!urls.length && currentUrl) {
-            urls.push(currentUrl);
-            titles.push(getChannelTitle(data));
+        // 3) Хоча б поточний канал
+        if (!urls.length && data.url) {
+            urls.push(String(data.url).trim());
+            titles.push(String(data.title || data.name || 'Канал').trim());
+            startIndex = 0;
         }
 
-        // Поточний канал — першим (для старих Vimu без startindex)
-        var idx = 0;
-        if (currentUrl && urls.length > 1) {
-            var f = urls.indexOf(currentUrl);
-            if (f > 0) idx = f;
-        }
-        if (typeof data.position === 'number' && data.position >= 0 && data.position < urls.length) {
-            idx = data.position;
-        }
-        if (idx > 0) {
-            urls = urls.slice(idx).concat(urls.slice(0, idx));
-            titles = titles.slice(idx).concat(titles.slice(0, idx));
+        // Зсув: поточний канал першим (для Vimu без startindex)
+        if (startIndex > 0 && startIndex < urls.length) {
+            urls = urls.slice(startIndex).concat(urls.slice(0, startIndex));
+            titles = titles.slice(startIndex).concat(titles.slice(0, startIndex));
+            startIndex = 0;
         }
 
-        return { urls: urls, titles: titles, index: 0 };
+        log('built channels=', urls.length);
+        return { urls: urls, titles: titles, index: startIndex };
     }
 
-    /**
-     * Відкрити через штатний bridge Lampa → нативний код сам збере Intent для Vimu
-     * (asusfilelist / asusnamelist / startindex уже є в LAMPA APK)
-     */
-    function openViaLampa(urls, titles, originalData) {
+    function openPlayer(urls, titles, originalData) {
         if (!urls.length) {
-            error('немає URL');
             Lampa.Noty.show('Vimu: немає URL');
             return false;
         }
@@ -92,154 +95,110 @@
             tv: true
         };
 
-        // Зберігаємо корисні поля з оригіналу
-        if (originalData) {
-            if (originalData.headers) payload.headers = originalData.headers;
-            if (originalData.timeline) payload.timeline = originalData.timeline;
-        }
+        if (originalData && originalData.headers) payload.headers = originalData.headers;
 
-        log('openPlayer channels=', urls.length, 'first=', urls[0].substring(0, 60));
+        log('openPlayer N=', urls.length, 'first=', urls[0].substring(0, 70));
 
         try {
-            // Офіційний шлях Lampa
             if (Lampa.Android && typeof Lampa.Android.openPlayer === 'function') {
                 Lampa.Android.openPlayer(urls[0], payload);
-                Lampa.Noty.show('Vimu: openPlayer (' + urls.length + ' каналів)');
+                Lampa.Noty.show('Vimu: ' + urls.length + ' каналів');
                 return true;
             }
             if (typeof AndroidJS !== 'undefined' && typeof AndroidJS.openPlayer === 'function') {
                 AndroidJS.openPlayer(urls[0], JSON.stringify(payload));
-                Lampa.Noty.show('Vimu: AndroidJS (' + urls.length + ')');
+                Lampa.Noty.show('Vimu: ' + urls.length + ' каналів');
                 return true;
             }
             if (typeof Android !== 'undefined' && typeof Android.openPlayer === 'function') {
                 Android.openPlayer(urls[0], JSON.stringify(payload));
-                Lampa.Noty.show('Vimu: Android (' + urls.length + ')');
+                Lampa.Noty.show('Vimu: ' + urls.length + ' каналів');
                 return true;
             }
-            error('немає bridge openPlayer');
+            error('немає openPlayer bridge');
             Lampa.Noty.show('Vimu: немає Android bridge');
         } catch (e) {
-            error('openPlayer exception', e && (e.message || e), e);
+            error('openPlayer', e && (e.message || e), e);
             Lampa.Noty.show('Vimu помилка: ' + (e.message || e));
         }
         return false;
     }
 
-    function launchIptv(data) {
-        if (!isAndroid()) {
-            log('не Android — пропуск');
-            return false;
-        }
-        if (!data) return false;
-
-        var pl = buildFromIptvData(data);
-        log('playlist size=', pl.urls.length);
-
+    function launch(data) {
+        if (!isAndroid() || !data) return false;
+        var pl = buildPlaylistFromIptv(data);
         if (!pl.urls.length) return false;
-
-        return openViaLampa(pl.urls, pl.titles, data);
+        return openPlayer(pl.urls, pl.titles, data);
     }
 
     function init() {
-        log('init v4');
+        log('init v5');
 
-        // ── 1. Перехоплюємо Player.iptv (головне для IPTV!) ──
-        if (Lampa.Player && typeof Lampa.Player.iptv === 'function') {
-            var origIptv = Lampa.Player.iptv.bind(Lampa.Player);
-
-            Lampa.Player.iptv = function (data) {
-                log('Player.iptv викликано', data && {
-                    url: data.url ? String(data.url).substring(0, 60) : null,
-                    playlist: data.playlist ? data.playlist.length : 0,
-                    title: data.title
-                });
-
-                // Якщо плеєр IPTV = android/external — відкриваємо самі і не пускаємо внутрішній
-                var p = Lampa.Storage.field('player_iptv') || Lampa.Storage.field('player') || '';
-                log('player_iptv=', p);
-
-                if (isAndroid() && (p === 'android' || p === 'external' || p === '')) {
-                    // Форсуємо android
-                    data = data || {};
-                    data.iptv = true;
-                    data.launch_player = 'android';
-
-                    if (launchIptv(data)) {
-                        log('IPTV відкрито через Vimu path, внутрішній скасовано');
-                        return; // не викликаємо origIptv
-                    }
-                }
-
-                // Інакше — стандартна поведінка Lampa
-                return origIptv(data);
-            };
-            log('Player.iptv обгорнуто');
-        } else {
-            error('Lampa.Player.iptv не знайдено');
+        if (!Lampa.Player || typeof Lampa.Player.iptv !== 'function') {
+            error('Player.iptv відсутній');
+            Lampa.Noty.show('Vimu: Player.iptv не знайдено');
+            return;
         }
 
-        // ── 2. Додатково: create (для звичайного play з iptv-флагом) ──
-        if (Lampa.Player && Lampa.Player.listener) {
+        var origIptv = Lampa.Player.iptv.bind(Lampa.Player);
+
+        Lampa.Player.iptv = function (data) {
+            log('Player.iptv', {
+                url: data && data.url ? String(data.url).substring(0, 60) : null,
+                position: data && data.position,
+                total: data && data.total,
+                hasGet: data && typeof data.onGetChannel
+            });
+
+            var p = Lampa.Storage.field('player_iptv') || Lampa.Storage.field('player') || '';
+            log('player_iptv=', p);
+
+            // Android: збираємо всі канали і відкриваємо Vimu через openPlayer
+            if (isAndroid() && (p === 'android' || p === 'external')) {
+                if (launch(data)) {
+                    log('відкрито зовні, внутрішній iptv скасовано');
+                    return;
+                }
+                error('launch не вдався, fallback origIptv');
+            }
+
+            // Якщо android, але launch не вийшов — хоча б додамо playlist у data
+            // щоб нативний LAMPA отримав усі канали
+            if (isAndroid() && data) {
+                var pl = buildPlaylistFromIptv(data);
+                if (pl.urls.length > 1) {
+                    data.playlist = pl.urls.map(function (u, i) {
+                        return { url: u, title: pl.titles[i] };
+                    });
+                    data.launch_player = 'android';
+                    log('додано data.playlist=', data.playlist.length);
+                }
+            }
+
+            return origIptv(data);
+        };
+
+        // Архів / play з плейлистом
+        if (Lampa.Player.listener) {
             Lampa.Player.listener.follow('create', function (e) {
                 if (!e || !e.data) return;
-                if (!(e.data.iptv || e.data.tv || e.data.iptv_player)) return;
+                if (!(e.data.iptv || e.data.tv)) return;
+                if (!isAndroid()) return;
 
-                log('Player.create iptv', e.data.url ? String(e.data.url).substring(0, 60) : '');
+                var p = Lampa.Storage.field('player_iptv') || '';
+                if (p !== 'android' && p !== 'external') return;
 
-                if (launchIptv(e.data)) {
-                    if (typeof e.abort === 'function') {
-                        e.abort();
-                        log('create aborted');
-                    }
+                // Якщо playlist вже є і > 1 — нічого не робимо (Lampa сама відкриє)
+                if (e.data.playlist && e.data.playlist.length > 1) return;
+
+                if (launch(e.data)) {
+                    if (typeof e.abort === 'function') e.abort();
                 }
             });
-            log('підписка create');
         }
 
-        // ── 3. Обгортка openPlayer — якщо Lampa вже йде назовні з коротким плейлистом ──
-        function wrapOpenPlayer(obj, name) {
-            if (!obj || typeof obj[name] !== 'function') return;
-            var orig = obj[name].bind(obj);
-            obj[name] = function (link, data) {
-                try {
-                    var parsed = data;
-                    if (typeof data === 'string') {
-                        try { parsed = JSON.parse(data); } catch (e) { parsed = {}; }
-                    }
-                    parsed = parsed || {};
-
-                    if (parsed.iptv || parsed.tv || parsed.iptv_player) {
-                        log('openPlayer wrap iptv, playlist=', parsed.playlist ? parsed.playlist.length : 0);
-
-                        // Якщо плейлист порожній/короткий — спробуємо збагатити з link
-                        if ((!parsed.playlist || !parsed.playlist.length) && link) {
-                            parsed.url = link;
-                            parsed.playlist = [{ url: link, title: parsed.title || 'Канал' }];
-                        }
-                    }
-                } catch (err) {
-                    error('wrap openPlayer', err);
-                }
-                return orig(link, typeof data === 'string' ? data : (data && JSON.stringify ? data : data));
-            };
-            // Для AndroidJS потрібен саме JSON-рядок
-            if (name === 'openPlayer' && obj === (typeof AndroidJS !== 'undefined' ? AndroidJS : null)) {
-                obj[name] = function (link, data) {
-                    var payload = data;
-                    if (typeof data !== 'string') {
-                        try { payload = JSON.stringify(data || {}); } catch (e) { payload = '{}'; }
-                    }
-                    return orig(link, payload);
-                };
-            }
-            log('обгорнуто', name);
-        }
-
-        if (Lampa.Android) wrapOpenPlayer(Lampa.Android, 'openPlayer');
-
-        Lampa.Noty.show('Vimu IPTV v4 активний');
-        log('init done, android=', isAndroid());
+        Lampa.Noty.show('Vimu IPTV v5 активний');
+        log('init done');
     }
 
     if (window.appready) init();
